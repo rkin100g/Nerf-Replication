@@ -1,6 +1,6 @@
 # Nerf-Replication
 
-Codebase for replicating the paper NeRF.
+Codebase for replicating the paper NeRF from ZJU CAD & CG Lab
 
 ## Setup
 
@@ -138,3 +138,71 @@ Then, run the following command to test the inference process:
 ```sh
 python run.py --type evaluate --cfg_file configs/nerf/lego.yaml
 ```
+
+# Experiment Record
+Following are the record of progress and problems encontered in the experiments
+
+## Set up
+I have updated environment from cuda 11.5 to cuda 12.1
+done
+
+## Data preparation
+Dataset file path: `src/datasets/nerf/blender.py`
+I have downloaded single sceen "lego",directory structure is as follows:
+```
+data/nerf_synthetic/lego
+|-- test
+|   |-- r_0_depth_0001.png
+|   |-- r_0_normal_0001.png
+|   |-- r_0_png
+|   |-- ...
+|   |-- r_199.png
+|-- train
+|   |-- r_0.png
+|   |-- ...
+|   |-- r_99.png
+|-- val
+|   |-- r_0.png
+|   |-- ...
+|   |-- r_99.png
+```
+
+## Configurations 
+configuration file path: `configs/nerf`
+
+Parameter description:
+```yaml
+task: "nerf_replication"
+gpus: [1] # set gpu device number
+exp_name: "nerf"
+scene: "lego"
+trained_model_dir: "data/trained_model"
+
+# set path for each modules
+train_dataset_module: src.datasets.nerf.blender
+test_dataset_module: src.datasets.nerf.blender
+network_module: src.models.nerf.network
+renderer_module: src.models.nerf.renderer.volume_renderer
+loss_module: src.train.trainers.nerf
+evaluator_module: src.evaluators.nerf
+
+...
+```
+
+## Implement of Dataset class
+Model file path: `src/models/nerf/network.py`
+
+
+## Implement of Network class
+Renderer file path: `src/models/nerf/renderer/volume_renderer.py`
+
+## Implement of Render class
+Renderer file path: `src/models/nerf/renderer/volume_renderer.py`
+
+## Implement of Trainer
+Trainer file path: `src/train/trainers/nerf.py`
+
+## Implement of Evaluator
+Evaluator file path: `src/evaluators/nerf.py`
+
+## Inference Process

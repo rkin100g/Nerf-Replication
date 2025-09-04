@@ -142,6 +142,23 @@ python run.py --type evaluate --cfg_file configs/nerf/lego.yaml
 # Experiment Record
 Following are the record of progress and problems encontered in the experiments
 
+## Structure and Core of Nerf
+Representation of Scene using Nerf :
+We represent a static scene as a continuous 5D function that outputs the radiance emitted in each direction (θ, φ) at each point (x, y, z) in space, and a density at each point which acts like a difffferential opacity controlling how much radiance is accumulated by a ray passing through (x, y, z).
+
+Process of Nerf:
+1) march camera rays through the scene to generate a sampled set of 3D points
+2) use those points and their corresponding 2D viewing directions as input to the neural network to produce an output set of colors and densities
+    3D coordinate x  -> 8 fully-connected layers(using ReLU activations and 256channels per layer)
+    -> σ and a 256-dimensional feature vector -> concatenated with the camera ray’s viewing direction
+    -> 1 fully-connected layer(using a ReLU activation and 128 channels) -> RGB color
+3) use classical volume rendering techniques to accumulate those colors and densities into a 2D image
+   
+
+input: a set of images with known camera poses
+input of network: 5D coordinate(saptial location(x,y,z) and viewing direction(θ, φ))a 3D Cartesian unit vector d as direction
+output:a single volume density and view-dependent RGB color.
+
 ## Set up
 I have updated environment from cuda 11.5 to cuda 12.1
 done
@@ -165,6 +182,47 @@ data/nerf_synthetic/lego
 |   |-- r_0.png
 |   |-- ...
 |   |-- r_99.png
+|-- transforms_train.json
+|-- transforms_val.json
+|-- transforms_test.json
+```
+
+format of transforms_tain/val/test.json:
+```
+"camera_angle_x"
+"frames": [
+    {
+            "file_path": "./train/r_0",
+            "rotation": 0.012566370614359171,
+            "transform_matrix": [
+                [
+                    -0.9999021887779236,
+                    0.004192245192825794,
+                    -0.013345719315111637,
+                    -0.05379832163453102
+                ],
+                [
+                    -0.013988681137561798,
+                    -0.2996590733528137,
+                    0.95394366979599,
+                    3.845470428466797
+                ],
+                [
+                    -4.656612873077393e-10,
+                    0.9540371894836426,
+                    0.29968830943107605,
+                    1.2080823183059692
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ]
+        },
+    ...
+]
 ```
 
 ## Configurations 
@@ -190,11 +248,36 @@ evaluator_module: src.evaluators.nerf
 ```
 
 ## Implement of Dataset class
-Model file path: `src/models/nerf/network.py`
+Dataset file path: `src/datasets/nerf/blender.py`
+### Input and Output
+train_loader = make_data_loader() ->trainer = make_trainer(cfg, network, train_loader)  -> trainer.train(epoch, train_loader, optimizer, recorder) -> train.py -> for iteration, batch in enumerate(data_loader)->
 
+### Data flow and Structure
+**overall data flow:**
+```
+cfg(data_root) -> _init_() -> self.data(data of each frame including image, transform_matrix), self.camera_angle_x -> _getitem_() -> data_dict={"colors", "ray_o", "ray_d"}
+```
+
+**_getitem_() backward reasoning:** 
+```
+colors -> pixels(u,v) -> uniformaly random choose 
+ray_o -> camera_xyz in world coordinate -> T
+ray_d -> direction vector in world coordinate -> trasnfrom from camera coordinate to world coordinate -> direction vector in camera coordiante -> K -> f,cx,cy -> camera_angle_x 
+```
+
+### Explanation of key formulas 
+**Computation of K:**
+[已知视场角下求解相机内参矩阵](https://blog.csdn.net/weixin_49053303/article/details/140603386?ops_request_misc=&request_id=&biz_id=102&utm_term=%E7%9B%B8%E6%9C%BA%E5%86%85%E5%8F%82%E8%AE%A1%E7%AE%97%20%E5%B7%B2%E7%9F%A5%E8%A7%86%E5%9C%BA%E8%A7%92&utm_medium=distribute.pc_search_result.none-task-blog-2~all~sobaiduweb~default-0-140603386.142^v102^control&spm=1018.2226.3001.4187)
+![computation of K with camera_angle_x known](image-1.png)
+
+**Compuation of ray direction:**
+Why we use direction vector instead of point? Because we can't decide where the point actually is since points with the same direction and different depth can progject into the same pixel in the image.So we use direction vector to represent rays instead of point which will be sampled later. 
+
+**Formula transforming pixel to direction vector:**
+(u, v, 1) = K (xn, yn, 1) -> (xn, yn, 1) = K^-1(u, v, 1) -> since camera position is (0, 0, 0) in camera coordinate -> direction verctor = (xn, yn, 1) in camera coordinate -> transform into world coordinate
 
 ## Implement of Network class
-Renderer file path: `src/models/nerf/renderer/volume_renderer.py`
+Model file path: `src/models/nerf/network.py`
 
 ## Implement of Render class
 Renderer file path: `src/models/nerf/renderer/volume_renderer.py`

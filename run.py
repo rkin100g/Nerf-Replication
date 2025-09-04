@@ -24,6 +24,14 @@ def run_network():
     from src.utils.net_utils import load_network
     from src.utils.data_utils import to_cuda
 
+    """
+    print("DEBUG: CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
+    print("DEBUG: is_available =", torch.cuda.is_available())
+    print("DEBUG: device_count =", torch.cuda.device_count())
+    if torch.cuda.is_available():
+        print("DEBUG: get_device_name =", torch.cuda.get_device_name(0))
+    """
+    
     network = make_network(cfg).cuda()
     load_network(network, cfg.trained_model_dir, epoch=cfg.test.epoch)
     network.eval()
@@ -52,7 +60,7 @@ def run_evaluate():
     from src.models.nerf.renderer import make_renderer
     from src.utils.net_utils import load_network
 
-    print(f"trainde_model_dir: {cfg.trained_model_dir}")
+    print(f"trained_model_dir: {cfg.trained_model_dir}")
     network = make_network(cfg).cuda()
     load_network(
         network, cfg.trained_model_dir, resume=cfg.resume, epoch=cfg.test.epoch

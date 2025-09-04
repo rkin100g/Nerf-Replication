@@ -165,6 +165,7 @@ done
 
 ## Data preparation
 Dataset file path: `src/datasets/nerf/blender.py`
+
 I have downloaded single sceen "lego",directory structure is as follows:
 ```
 data/nerf_synthetic/lego
@@ -193,65 +194,30 @@ format of transforms_tain/val/test.json:
 "frames": [
     {
             "file_path": "./train/r_0",
-            "rotation": 0.012566370614359171,
-            "transform_matrix": [
-                [
-                    -0.9999021887779236,
-                    0.004192245192825794,
-                    -0.013345719315111637,
-                    -0.05379832163453102
-                ],
-                [
-                    -0.013988681137561798,
-                    -0.2996590733528137,
-                    0.95394366979599,
-                    3.845470428466797
-                ],
-                [
-                    -4.656612873077393e-10,
-                    0.9540371894836426,
-                    0.29968830943107605,
-                    1.2080823183059692
-                ],
-                [
-                    0.0,
-                    0.0,
-                    0.0,
-                    1.0
-                ]
-            ]
-        },
+            "rotation":
+            "transform_matrix": 
+    },
     ...
 ]
-```
-
-## Configurations 
-configuration file path: `configs/nerf`
-
-Parameter description:
-```yaml
-task: "nerf_replication"
-gpus: [1] # set gpu device number
-exp_name: "nerf"
-scene: "lego"
-trained_model_dir: "data/trained_model"
-
-# set path for each modules
-train_dataset_module: src.datasets.nerf.blender
-test_dataset_module: src.datasets.nerf.blender
-network_module: src.models.nerf.network
-renderer_module: src.models.nerf.renderer.volume_renderer
-loss_module: src.train.trainers.nerf
-evaluator_module: src.evaluators.nerf
-
-...
 ```
 
 ## Implement of Dataset class
 Dataset file path: `src/datasets/nerf/blender.py`
 ### Input and Output
-train_loader = make_data_loader() ->trainer = make_trainer(cfg, network, train_loader)  -> trainer.train(epoch, train_loader, optimizer, recorder) -> train.py -> for iteration, batch in enumerate(data_loader)->
-
+Input：
+```
+cfg.test/train_dataset including data_root,split,input_ratio,cams,H,W
+```
+Output：
+```
+data_dict ={
+    "colors":torch.from_numpy(colors).float(),
+    "rays_o":torch.from_numpy(rays_o).float(),
+    "rays_d":torch.from_numpy(rays_d).float(),
+    "depth":torch.from_numpy(depth).float(),     # only if split is test
+    "normal":torch.from_numpy(normal).float(),   # only if split is test
+}
+```
 ### Data flow and Structure
 **overall data flow:**
 ```
@@ -267,15 +233,26 @@ ray_d -> direction vector in world coordinate -> trasnfrom from camera coordinat
 
 ### Explanation of key formulas 
 **Computation of K:**
+
 [已知视场角下求解相机内参矩阵](https://blog.csdn.net/weixin_49053303/article/details/140603386?ops_request_misc=&request_id=&biz_id=102&utm_term=%E7%9B%B8%E6%9C%BA%E5%86%85%E5%8F%82%E8%AE%A1%E7%AE%97%20%E5%B7%B2%E7%9F%A5%E8%A7%86%E5%9C%BA%E8%A7%92&utm_medium=distribute.pc_search_result.none-task-blog-2~all~sobaiduweb~default-0-140603386.142^v102^control&spm=1018.2226.3001.4187)
-![computation of K with camera_angle_x known](image-1.png)
+
 
 **Compuation of ray direction:**
+
 Why we use direction vector instead of point? Because we can't decide where the point actually is since points with the same direction and different depth can progject into the same pixel in the image.So we use direction vector to represent rays instead of point which will be sampled later. 
 
 **Formula transforming pixel to direction vector:**
+```
 (u, v, 1) = K (xn, yn, 1) -> (xn, yn, 1) = K^-1(u, v, 1) -> since camera position is (0, 0, 0) in camera coordinate -> direction verctor = (xn, yn, 1) in camera coordinate -> transform into world coordinate
+```
 
+### Problems encontered
+Probelm：np.broadcast_to function only return read-only view instead of writable numpy which will casue problem while transfroming into tensor
+
+Solution：add .copy() to generate writable copy
+```python
+rays_o = np.broadcast_to(transform_matrix[:3,3], rays_d.shape).copy()
+```
 ## Implement of Network class
 Model file path: `src/models/nerf/network.py`
 

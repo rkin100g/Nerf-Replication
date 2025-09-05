@@ -75,12 +75,19 @@ def run_network():
     data_loader = make_data_loader(cfg, is_train=False)
     renderer = make_renderer(cfg, network)
     total_time = 0
+    debug_flag = 0
     for batch in tqdm.tqdm(data_loader):
         batch = to_cuda(batch)
         with torch.no_grad():
             torch.cuda.synchronize()
             start = time.time()
-            output = renderer.render(batch)
+            rgb_values, depth_values = renderer.render(batch)
+            if debug_flag == 0:
+                print("rgb shape:", rgb_values.shape)
+                print("rgb: ", rgb_values)
+                print("depth shape:", depth_values.shape)
+                print("depth: ", depth_values)
+                debug_flag = 1
             torch.cuda.synchronize()
             total_time += time.time() - start
     print(total_time / len(data_loader))

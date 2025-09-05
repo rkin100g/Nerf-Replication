@@ -1,6 +1,6 @@
 task: "nerf_replication"
 gpus: [0] # set gpu device number
-exp_name: "nerf"
+exp_name: "render_stratified_sampling_debug"
 scene: "lego"
 
 train_dataset_module: src.datasets.nerf.blender

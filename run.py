@@ -1,7 +1,11 @@
 from src.config import cfg, args
 import numpy as np
 import os
+import torch
 
+class TestNet(torch.nn.Module):
+    def forward(self, x):
+        return x
 
 ### SCRIPTS BEGINING ###
 def run_dataset():
@@ -10,9 +14,41 @@ def run_dataset():
 
     cfg.train.num_workers = 0
     data_loader = make_data_loader(cfg, is_train=False)
+    debug_flag = 0
     for batch in tqdm.tqdm(data_loader):
+        if debug_flag == 0:
+            print("rays_o shape:", batch["rays_o"].shape)
+            print("rays_d shape:", batch["rays_d"].shape)
+            print("example rays_o[0]:", batch["rays_o"][0])
+            print("example rays_d[0]:", batch["rays_d"][0])
+            debug_flag = 1
         pass
 
+def run_input():
+    """
+    test input of network from dataset to render's starfitied sampleing 
+    """
+    import tqdm
+    from src.datasets import make_data_loader
+    from src.models.nerf.renderer import make_renderer
+    from src.models.nerf.renderer.volume_renderer import Renderer
+
+    cfg.train.num_workers = 0
+    data_loader = make_data_loader(cfg, is_train=False)
+    network = TestNet()
+    renderer = make_renderer(cfg, network)
+    
+    debug_flag = 0
+    for batch in tqdm.tqdm(data_loader):
+        if debug_flag == 0:
+            print("dataset output's rays_o shape:", batch["rays_o"].shape)
+            print("dataset output's rays_d shape:", batch["rays_d"].shape)
+            print("example rays_o[0]:", batch["rays_o"][0])
+            print("example rays_d[0]:", batch["rays_d"][0])
+
+            renderer.render(batch)
+            debug_flag = 1
+        pass
 
 def run_network():
     import tqdm

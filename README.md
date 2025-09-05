@@ -255,6 +255,7 @@ rays_o = np.broadcast_to(transform_matrix[:3,3], rays_d.shape).copy()
 ```
 ## Implement of Network class
 Model file path: `src/models/nerf/network.py`
+
 I have change the gpus from 1 to 0 in lego.yaml config file to make it fit for my computer and I have run the network successfully !
 
 ## Implement of Render class

@@ -261,6 +261,12 @@ I have change the gpus from 1 to 0 in lego.yaml config file to make it fit for m
 ## Implement of Render class
 Renderer file path: `src/models/nerf/renderer/volume_renderer.py`
 
+### Implement of Sapmled points choice
+**stratified sampling Steps:**
+- (1)uniformally choose chin points in ray
+- (2)randomly choose sampled points in each chin
+- (3)get different sampled points for each ray
+
 ## Implement of Trainer
 Trainer file path: `src/train/trainers/nerf.py`
 

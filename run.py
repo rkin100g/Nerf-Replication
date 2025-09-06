@@ -43,8 +43,6 @@ def run_input():
         if debug_flag == 0:
             print("dataset output's rays_o shape:", batch["rays_o"].shape)
             print("dataset output's rays_d shape:", batch["rays_d"].shape)
-            print("example rays_o[0]:", batch["rays_o"][0])
-            print("example rays_d[0]:", batch["rays_d"][0])
 
             renderer.render(batch)
             debug_flag = 1
@@ -75,21 +73,57 @@ def run_network():
     data_loader = make_data_loader(cfg, is_train=False)
     renderer = make_renderer(cfg, network)
     total_time = 0
-    debug_flag = 0
+    print("Run-prepare finsh")
+
+    count = 0
+
     for batch in tqdm.tqdm(data_loader):
+        print("Run-count processing:",count)
+        
         batch = to_cuda(batch)
         with torch.no_grad():
             torch.cuda.synchronize()
             start = time.time()
             rgb_values, depth_values = renderer.render(batch)
-            if debug_flag == 0:
-                print("rgb shape:", rgb_values.shape)
-                print("rgb: ", rgb_values)
-                print("depth shape:", depth_values.shape)
-                print("depth: ", depth_values)
-                debug_flag = 1
+            
+            # 输出debug
+            print("Run-rgb shape:", rgb_values.shape)
+            print("Run-rgb: ", rgb_values)
+            print("Run-depth shape:", depth_values.shape)
+            print("Run-depth: ", depth_values)
+            
+
+            import os, cv2
+            current_dir = os.getcwd()
+            result_dir = 'result'
+            result_abs_dir = os.path.abspath(result_dir)
+            print(f"Run-current_dir: {current_dir}")
+            print(f"Run-result_dir: {result_abs_dir}")
+            
+            os.makedirs(result_dir, exist_ok=True)
+            print(f"Run-whether result_dir exits: {os.path.exists(result_dir)}")  # 新增：确认文件夹是否创建
+            
+            H = W = 640
+            rgb_pred = rgb_values.reshape(H, W, 3)  # (H, W, 3)
+            
+            # 1. 将 CUDA 张量转移到 CPU → 脱离计算图 → 转换为 numpy 数组
+            rgb_pred_np = rgb_pred.cpu().detach().numpy()
+            
+            # 2. 裁剪、转换通道（RGB→BGR，因为 OpenCV 默认 BGR 格式）、缩放
+            img_data = (np.clip(rgb_pred_np, 0, 1)[..., ::-1] * 255).astype(np.uint8)
+            
+            # 3. 保存
+            # 正确格式：文件名包含count变量，第二个参数是图像数据
+            cv2.imwrite(
+                os.path.join(result_dir, f"view_pred_f{count}.png"),  # 文件名用f-string嵌入count
+                img_data  # 图像数据（必须是OpenCV支持的格式，如numpy数组）
+            )
+            print("Run-image saved")
+
             torch.cuda.synchronize()
             total_time += time.time() - start
+        
+        count += 1
     print(total_time / len(data_loader))
 
 

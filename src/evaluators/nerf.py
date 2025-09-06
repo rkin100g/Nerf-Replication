@@ -6,6 +6,7 @@ from skimage.metrics import structural_similarity as compare_ssim
 import cv2
 import json
 import warnings
+import torch
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -41,13 +42,50 @@ class Evaluator:
         return ssim
 
     def evaluate(self, output, batch):
-        """
-        Write your codes here.
-        """
-        pass
+        
+        rgb_pred, depth_pred = output
+        rgb_gt = batch["colors"][..., :3]
+        
+        # 先转 numpy
+        if torch.is_tensor(rgb_pred):
+            rgb_pred = rgb_pred.detach().cpu().numpy()
+        if torch.is_tensor(rgb_gt):
+            rgb_gt = rgb_gt.detach().cpu().numpy()
+
+        # 计算指标
+        mse = np.mean((rgb_pred - rgb_gt) ** 2)
+
+        self.mse.append(mse)
+
+        psnr_val = self.psnr_metric(rgb_pred, rgb_gt)
+        self.psnr.append(psnr_val)
+
+        #ssim_val = self.ssim_metric(rgb_pred, rgb_gt)
+        #self.ssim.append(ssim_val)
+
+        # 保存图片
+        result_dir = os.path.join(cfg.result_dir, "images")
+        B, N_rays, _ = batch["rays_o"].shape
+        H = W = 640
+        rgb_pred = rgb_pred.reshape(H, W, 3)  # (H, W, 3)
+        rgb_gt = rgb_gt.reshape(H, W, 3)  # (H, W, 3)
+
+        os.makedirs(result_dir, exist_ok=True)
+        cv2.imwrite(
+            os.path.join(result_dir, f"view_pred.png"),
+            (np.clip(rgb_pred,0,1)[..., ::-1] * 255).astype(np.uint8),
+        )
+        cv2.imwrite(
+            os.path.join(result_dir, f"view_gt.png"),
+            (np.clip(rgb_gt,0,1)[..., ::-1] * 255).astype(np.uint8),
+        )
 
     def summarize(self):
-        """
-        Write your codes here.
-        """
-        pass
+        mse_avg = np.mean(self.mse) if self.mse else 0
+        psnr_avg = np.mean(self.psnr) if self.psnr else 0
+        #ssim_avg = np.mean(self.ssim) if self.ssim else 0
+        return {
+            "mse": mse_avg,
+            "psnr": psnr_avg,
+            #"ssim": ssim_avg
+        }

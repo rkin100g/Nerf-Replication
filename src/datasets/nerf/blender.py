@@ -29,7 +29,7 @@ class Dataset(data.Dataset):
         self.split = kwargs.get("split", "val")            # 默认为val部分
         self.H = kwargs.get("H", 800)                      # 默认高度
         self.W = kwargs.get("W", 800)                      # 默认宽度
-        self.input_ratio = kwargs.get("input_ratio", 0.5)  # 默认下采样
+        self.input_ratio = kwargs.get("input_ratio", 1)  # 默认下采样
 
         # 读取json文件
         json_path = os.path.join(self.data_root, f"transforms_{self.split}.json")
@@ -50,6 +50,7 @@ class Dataset(data.Dataset):
             # 拼接图像路径与图像下采样
             img_path = os.path.join(self.data_root, frame["file_path"]+".png")
             image = np.array(imageio.imread(img_path), dtype=np.float32, copy=True)
+            image = image[..., :3]  # 只保留RGB通道，丢弃Alpha
             image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
 
             if self.split == "test":
@@ -59,7 +60,8 @@ class Dataset(data.Dataset):
                 normal_img = np.array(imageio.imread(normal_path), dtype=np.float32, copy=True)
 
                 # 深度图和法线图下采样
-                depth_img = cv2.resize(depth_img, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+                # 深度图下采样用最近邻插值
+                depth_img = cv2.resize(depth_img, (self.W, self.H), interpolation=cv2.INTER_NEAREST)            # 深度图采样方式修改
                 normal_img = cv2.resize(normal_img, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
                 
                 # 保存每帧数据
@@ -121,6 +123,7 @@ class Dataset(data.Dataset):
 
         # 转到世界坐标系
         rays_d = (transform_matrix[:3,:3] @ dirs.T).T
+        rays_d = rays_d / np.linalg.norm(rays_d, axis=-1, keepdims=True)  # 单位化
         rays_o = np.broadcast_to(transform_matrix[:3,3], rays_d.shape).copy()
 
         if self.split == "test":
@@ -129,6 +132,18 @@ class Dataset(data.Dataset):
             normal_img = frame["normal"]
             depth = depth_img[sampled_pixels[:, 1], sampled_pixels[:, 0]] 
             normal = normal_img[sampled_pixels[:, 1], sampled_pixels[:, 0]] / 255.0
+
+            """
+            # 将深度图中的相机坐标系下的深度信息转到世界坐标系下
+            # 相机坐标系下的点：(dirs * depth) → 方向向量乘以深度
+            cam_coords = dirs * depth[..., None]  # (N, 3)，相机坐标系下的点
+            # 2. 转换到世界坐标系：世界点 = R * 相机点 + T
+            world_coords = (transform_matrix[:3,:3] @ cam_coords.T).T + transform_matrix[:3,3]  # (N, 3)
+            # 3. 世界坐标系深度 = 世界点到光线起点（相机原点）的距离
+            depth_world = np.linalg.norm(world_coords - rays_o, axis=-1)  # (N,)
+            # 用世界坐标系深度替换原始深度
+            depth = depth_world
+            """
 
             data_dict ={
                 "colors":torch.from_numpy(colors).float(),

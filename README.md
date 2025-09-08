@@ -261,16 +261,30 @@ I have change the gpus from 1 to 0 in lego.yaml config file to make it fit for m
 ## Implement of Render class
 Renderer file path: `src/models/nerf/renderer/volume_renderer.py`
 
+### Overall Process of rendering
+1) data preparation including flattening rays
+2) generate coarse points by stratified_sample_points_from_rays function
+3) generate rgb and density preded by coarse network
+4) generate fine points by importance_sample_points function
+5) combine both coarse and fine points as input of nerwork
+6) generate rgb and density preded by fine network
+7) generate rgb_values and depth_values by volume rendering method
+
 ### Implement of Sapmled points choice
 **stratified sampling Steps:**
 - (1)uniformally choose chin points in ray
-- (2)randomly choose sampled points in each chin
+- (2)randomly choose sampled points in each chin(train)
 - (3)get different sampled points for each ray
 
-## Implement of Trainer
-Trainer file path: `src/train/trainers/nerf.py`
+**importance sampling Steps:**
+- (1)compute weights of each chin of coarse points
+- (2)compute cdf,pdf using weights
+- (3)choose u in range(0,1) to generate sampled_points (train randomly,tesr lineraly)
+- (4)get index of chin points both in cdf and depth corrporsending to position relationship between u and cdf
+- (5)generate sampled points
 
-## Implement of Evaluator
-Evaluator file path: `src/evaluators/nerf.py`
+### Problems encontered
+Problem 1:I used boundouary of coarse points's depth instead of mids to generate sampled points
 
-## Inference Process
+Problem 2:I didn't use different sampleing methods for different task like tarin or test.Because test task we shouldn't randomly choose sampled points which will cause lots of noisy points
+

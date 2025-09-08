@@ -16,7 +16,9 @@ class Renderer:
         self.N_importance = getattr(cfg, "N_importance", 128)
         self.perturb = getattr(cfg, "perturb", True)
         self.sample_size = 64                            # 每批采样点处理数量
-        self.rays_size = 102400                          # 每批光线处理数量
+        self.rays_size = 160000                          # 每批光线处理数量
+        self.task = getattr(cfg, "task", "test")
+        self.perturb = self.perturb if self.task == "train" else False   # 如果是测试阶段，就不进行随机采样
 
 
     def stratified_sample_points_from_rays(self, rays_o, rays_d, N_samples=64, t_n=2.0, t_f=6.0, perturb=True):
@@ -39,7 +41,7 @@ class Renderer:
         t_linear = torch.linspace(t_n, t_f, N_samples, device=device)                # (N_samples,)
         t_sample = t_linear.unsqueeze(0).expand(N_rays, N_samples).clone()           # (N_rays, N_sampls)
 
-        # 每段内进行随机选取点
+        # 每段内进行随机选取点(train),均匀采样(test)
         if perturb:
             # 计算每段期间重点，左边界，有边界
             mids = 0.5 * (t_linear[1:] + t_linear[:-1])                            # 每段中间点 (N_samples,)
@@ -73,88 +75,90 @@ class Renderer:
         # 计算概率密度分布
         # 计算ti+1 - ti,最后一个点没有下一个点，所以补一个很大的值作为间隔
         delta = t_sample[..., 1:] -t_sample[..., :-1]
-        delta = torch.cat([delta, torch.tensor([1e10], device=device).expand(delta[..., :1].shape)], dim=-1)
+        delta = torch.cat([delta, 1e10 * torch.ones_like(delta[..., :1])], dim=-1)
 
         # 计算不透明度alpha (N_rays, N_samples)
         alpha = 1.0 - torch.exp(-density * delta)
 
         # 计算透射率
-        temp = torch.cat([torch.ones(alpha.shape[0], 1, device=device), 1.0 - alpha + 1e-10], dim=-1)
+        temp = torch.cat([
+            torch.ones(alpha.shape[0], 1, device=device),
+            torch.clamp(1.0 - alpha, min=1e-10, max=1.0)  # 限制在[1e-10, 1.0]，避免T>1
+        ], dim=-1)
         T = torch.cumprod(temp, dim=-1)[:, :-1]
 
         # 计算权重
         weights = T * alpha
         
-        # 释放中间量，降低显存占用
-        del delta, alpha, temp, T
-        
         return weights
-    
-    def importance_sample_points(self, density_coarse, rays_o, rays_d, t_coarse, N_importance):
+
+    def importance_sample_points(self, density_coarse, rays_o, rays_d, t_coarse, N_importance, eps = 1e-5):
         """
         Inputs:
             density_coarse: (N_rays, N_samples) 粗采样点的密度
             rays_o: (N_rays, 3) torch tensor    
             rays_d: (N_rays, 3) torch tensor
             t_coarse:  (N_rays, N_samples)      粗采样点的深度
+            eps:偏置避免除以0
 
         returns:
             t_fine: (N_rays, N_importance) depths along ray 新采样点的深度
             fine_points: (N_rays, N_importance, 3) sampled 3D points in world coords
         """
+
         device = self.device
-        # 计算权重
-        weights = self.weights_computation(density=density_coarse, t_sample=t_coarse)   # (N_rays, N_samples)
         
-        # 计算概率密度函数
-        pdf = weights / (weights.sum(dim=-1, keepdim=True) + 1e-5)                  # (N_rays, N_samples)
+        # Step 1:计算归一化权重
+        weights = self.weights_computation(density=density_coarse, t_sample=t_coarse)
+        weights = weights[..., 1:-1]  # 取中间N_samples-1个间隔的权重
         
-        # 计算分布函数(累加和)
-        cdf = torch.cumsum(pdf, dim=-1)                                             # (N_rays, N_samples)
-        cdf = torch.cat([torch.zeros(cdf.shape[0], 1, device=device), cdf], dim=-1)                 
+        weights = weights + eps  # 防止数值不稳定
+        pdf = weights / torch.sum(weights, -1, keepdim=True)  # [N_rays, N_samples-1]
+        cdf = torch.cumsum(pdf, -1)  # [N_rays, N_samples-1]
+        cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)  # [N_rays, N_samples]
 
-        # 均匀随机采样
-        N_rays = rays_o.shape[0]
-        u = torch.rand(N_rays, N_importance, device=device)
-
-        # 逆变换获得index索引(u在cdf中对应右侧采样点的位置)
-        sample_index = torch.searchsorted(cdf, u, right=True)
-        sample_index = torch.clamp(sample_index, min=0, max=cdf.shape[-1] - 1)  # 上限为N_samples，而非N_samples-1
-
-        # 确定采样点左右索引和左右采样点深度
-        sample_index_below = torch.clamp(sample_index - 1, min=0, max=t_coarse.shape[-1] - 1)
-        sample_index_above = torch.where(
-            sample_index <= self.N_samples - 1,  # 条件：未超过t_coarse的最大索引
-            sample_index,                  # 满足条件：用sample_index
-            torch.tensor(self.N_samples - 1, device=device)  # 不满足条件：强制为t_coarse的最后一个索引
-        )
-        t_coarse_below = torch.gather(t_coarse, 1, sample_index_below)
-        t_coarse_above = torch.gather(t_coarse, 1, sample_index_above)
-
-        # 确定深度边界
-        cdf_below = torch.gather(cdf, 1, sample_index_below)
-        cdf_above = torch.gather(cdf, 1, sample_index_above)
-
-        # 由线性比例来确定精确采样位置
-        cdf_range = cdf_above - cdf_below
-        cdf_range[cdf_range < 1e-5] = 1e-10
-        t = (u - cdf_below) / cdf_range
-        t_fine = t_coarse_below + t * (t_coarse_above - t_coarse_below)
+        # Step 2:生成采样点[训练时随机,测试时确定]
+        if self.task == "train":               # 训练模式,随机采样避免过拟合
+            u = torch.rand(list(cdf.shape[:-1]) + [N_importance], device=device)                 # 随机均匀采样
+        else:                                   # 测试模式,确保渲染可重复,减少噪点存在
+            u = torch.linspace(0., 1., steps=N_importance, device=device)  # 线性均匀采样
+            u = u.expand(list(cdf.shape[:-1]) + [N_importance])  # 扩展到与射线数量匹配
         
-        # 采样得到新的采样点
+        # Step 3:线性插值找对应cdf采样位置(原方案为获得index后各自在cdf和depth里找左右索引，后发现nerf代码直接构造了左右边界的代码组合更简洁)
+        u = u.contiguous()
+        inds = torch.searchsorted(cdf, u, right=True)                        # 找到u在CDF中的位置
+        below = torch.clamp(inds - 1, 0, cdf.shape[-1]-1)                    # 确定左边界
+        above = torch.clamp(inds, 0, cdf.shape[-1]-1)                        # 确定右边界
+        inds_g = torch.stack([below, above], -1)  # [N_rays, N_importance, 2]# 构造采样区间
+
+        # Step 4:计算区间中点，因为区间的权重可以近似看成是区间中点的权重，由此一一对应更加合适
+        bins = 0.5 * (t_coarse[..., 1:] + t_coarse[..., :-1])  # 此时 bins 形状为 (N_rays, N_samples-1)
+
+        # Step 5:从bins中插值出采样点
+        # 统一形状,用于拓展出细采样点的左右边界
+        matched_shape = [inds_g.shape[0], inds_g.shape[1], bins.shape[-1]]      # (N_rays,N_importance,N_samples-1) 
+        
+        # 获取每个采样点对应cdf上下边界
+        cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+        
+        # 提取每个采样点的深度
+        bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+        
+        # 计算CDF区间长度,同时避免除以0
+        denom = cdf_g[..., 1] - cdf_g[..., 0]
+        denom = torch.where(denom < eps, torch.ones_like(denom), denom)  # 避免除零
+        
+        # 获取比例，采样点深度
+        t = (u - cdf_g[..., 0]) / denom
+        t_fine = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
         fine_points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_fine.unsqueeze(2)
-        
-        # 最后返回之前释放中间量，降低显存占用
-        del weights, pdf, cdf, cdf_range
 
         return fine_points, t_fine
-    
 
     def render(self, batch):
         """
         This function is responsible for rendering the output of the model, which includes the RGB values and the depth values.
         """
-        #(按理说要分train和test进行不同的处理，或者有所区分，这里为了快速测试render部分没有问题，暂时不做区分)
         # Part 1:构造网络输入
         # 获得rays([batch_size,N_rays,N_samples])
         rays_o = batch["rays_o"]
@@ -172,6 +176,7 @@ class Renderer:
         )
         depth = t_coarse
         
+
         # Part 2:传入粗网络输出结果
         # 计算观测方向viewdirs(即ray_d单位向量)
         viewdirs = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)  # 单位向量 (N_rays, 3)
@@ -250,10 +255,6 @@ class Renderer:
         # 求和得到每个像素的rgb与深度值
         rgb_values = torch.sum(weights.unsqueeze(-1) * rgb, dim=1)  # (N_rays, 3)
         depth_values = torch.sum(weights * depth, dim=1)          # (N_rays,)
-        
-        # 对空区域（权重和 < 0.01）的depth设为far
-        weights_sum = torch.sum(weights, dim=1)
-        #depth = torch.where(weights_sum < 0.01, torch.tensor(0.6, device=self.device), depth)
 
         # 白色背景处理
         if self.white_bkgd:

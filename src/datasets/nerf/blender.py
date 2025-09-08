@@ -151,6 +151,9 @@ class Dataset(data.Dataset):
                 "rays_d":torch.from_numpy(rays_d).float(),
                 "depth":torch.from_numpy(depth).float(),
                 "normal":torch.from_numpy(normal).float(),
+                "H":torch.tensor(self.H, dtype=torch.int),
+                "W":torch.tensor(self.W, dtype=torch.int),
+                "id":torch.tensor(index, dtype=torch.int),
             }
         
         else: # train / val
@@ -159,6 +162,9 @@ class Dataset(data.Dataset):
                 "colors":torch.from_numpy(colors).float(),
                 "rays_o":torch.from_numpy(rays_o).float(),
                 "rays_d":torch.from_numpy(rays_d).float(),
+                "H":torch.tensor(self.H, dtype=torch.int),
+                "W":torch.tensor(self.W, dtype=torch.int),
+                "id":torch.tensor(index, dtype=torch.int),
             }
 
         return data_dict

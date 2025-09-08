@@ -92,7 +92,6 @@ def run_network():
             print("Run-depth shape:", depth_values.shape)
             print("Run-depth: ", depth_values)
             
-
             import os, cv2
             current_dir = os.getcwd()
             result_dir = 'result'
@@ -103,12 +102,26 @@ def run_network():
             os.makedirs(result_dir, exist_ok=True)
             print(f"Run-whether result_dir exits: {os.path.exists(result_dir)}")  # 新增：确认文件夹是否创建
             
-            H = W = 640
+            H = W = 400
             rgb_pred = rgb_values.reshape(H, W, 3)  # (H, W, 3)
             
             # 1. 将 CUDA 张量转移到 CPU → 脱离计算图 → 转换为 numpy 数组
             rgb_pred_np = rgb_pred.cpu().detach().numpy()
-            
+            rgb_gt = batch["colors"].reshape(H, W, 3).cpu().detach().numpy()  # 转为numpy，(H,W,3)
+
+            # 计算psnr
+            rgb_pred_uint8 = (np.clip(rgb_pred_np, 0, 1) * 255).astype(np.uint8)
+            rgb_gt_uint8 = (np.clip(rgb_gt, 0, 1) * 255).astype(np.uint8)
+
+            # 计算MSE
+            mse = np.mean((rgb_pred_uint8 - rgb_gt_uint8) **2)
+            print("mse:",mse)
+            if mse < 1e-10:
+                psnr = 100.0
+            else:
+                psnr = 10 * np.log10((255** 2) / mse)
+            print(f"PSNR for view {count}: {psnr:.2f} dB")
+
             # 2. 裁剪、转换通道（RGB→BGR，因为 OpenCV 默认 BGR 格式）、缩放
             img_data = (np.clip(rgb_pred_np, 0, 1)[..., ::-1] * 255).astype(np.uint8)
             

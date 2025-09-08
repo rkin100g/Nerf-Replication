@@ -29,7 +29,8 @@ class Evaluator:
             return 100.0
         return 10 * np.log10((255** 2) / mse)
 
-    def ssim_metric_2(self, img_pred, img_gt, batch, id, num_imgs):
+    """
+    def ssim_metric_orgin(self, img_pred, img_gt, batch, id, num_imgs):
         result_dir = os.path.join(cfg.result_dir, "images")
         os.system("mkdir -p {}".format(result_dir))
         cv2.imwrite(
@@ -44,6 +45,7 @@ class Evaluator:
 
         ssim = compare_ssim(img_pred, img_gt, win_size=101, full=True)
         return ssim
+    """
     
     def ssim_metric(self, img_pred, img_gt, batch, id, num_imgs):
         result_dir = os.path.join(cfg.result_dir, "images")

@@ -168,8 +168,9 @@ class Network(nn.Module):
 
         return ret
 
+    """
     def forward(self, inputs, viewdirs, model=""):
-        """Prepares inputs and applies network 'fn'."""
+        Prepares inputs and applies network 'fn'.
         if model == "fine":
             fn = self.model_fine
         else:
@@ -189,4 +190,66 @@ class Network(nn.Module):
         outputs = torch.reshape(
             outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
         )
+        return outputs
+    """
+    def forward(self, inputs, viewdirs, valid_mask, model=""):
+        """Prepares inputs and applies network 'fn'."""
+        if model == "fine":
+            fn = self.model_fine
+        else:
+            fn = self.model
+
+        # Part 1：构造输入
+        # 筛选有效点
+        if valid_mask is not None:
+            # 展平掩码
+            valid_mask_flat = valid_mask.reshape(-1)
+            # 筛选有效点
+            inputs_valid = inputs.reshape(-1, 3)[valid_mask_flat]
+            # 先拓展视角再筛选有效视角
+            viewdirs_expand = viewdirs[:, None].expand_as(inputs)  # [N_rays, N_importance, 3]
+            viewdirs_valid = viewdirs_expand.reshape(-1, 3)[valid_mask_flat]
+        else:
+            inputs_valid = torch.reshape(inputs, [-1, inputs.shape[-1]])
+            viewdirs_valid = viewdirs[:, None].expand_as(inputs).reshape(-1, 3)
+
+        # 对坐标编码
+        embedded = self.embed_fn(inputs_valid)
+
+        if self.use_viewdirs:
+            # 对视角编码
+            embedded_dirs = self.embeddirs_fn(viewdirs_valid)
+            embedded = torch.cat([embedded, embedded_dirs], -1)
+
+        embedded = embedded.to(torch.float32)
+        
+        # Part 2：分块处理计算结果
+        outputs_valid_flat = self.batchify(fn, self.chunk)(embedded)
+
+        # Part 3：构造输出
+        # Step 1:初始化原形状的输出张量（无效点用0填充，不影响体渲染）
+        outputs_shape = list(inputs.shape[:-1]) + [outputs_valid_flat.shape[-1]]  # [N_rays, N_importance, output_ch]
+        outputs = torch.zeros(outputs_shape, device=self.device)
+
+        # Step 2:
+        if valid_mask is not None:
+            # 获取shape
+            N_rays, N_importance = valid_mask.shape
+            
+            # 生成全局展平索引：[0, 1, ..., N_rays*N_importance-1]
+            global_indices = torch.arange(N_rays * N_importance, device=self.device)
+            
+            # 筛选有效点的全局索引
+            valid_global_indices = global_indices[valid_mask_flat]
+            
+            # 转换为原张量的2D索引（r=射线号，s=该射线内的采样点号）
+            r = valid_global_indices // N_importance
+            s = valid_global_indices % N_importance
+            
+            # 3. 将有效点结果填充到原输出张量
+            outputs[r, s] = outputs_valid_flat
+        else:
+            # 无无效点，直接重构维度
+            outputs = torch.reshape(outputs_valid_flat, outputs_shape)
+
         return outputs

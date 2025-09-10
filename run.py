@@ -137,8 +137,10 @@ def run_network():
             total_time += time.time() - start
         
         count += 1
-    print(total_time / len(data_loader))
-
+        if(count == 4):
+            break
+    #print(total_time / len(data_loader))
+    print("total_time:",total_time)
 
 def run_evaluate():
     import time

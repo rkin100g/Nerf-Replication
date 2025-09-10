@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from src.config import cfg
 import torch.nn.functional as F
+import time
 
 
 class Renderer:
@@ -94,73 +95,6 @@ class Renderer:
         
         return weights
 
-    def importance_sample_points(self, density_coarse, rays_o, rays_d, t_coarse, N_importance, eps = 1e-5):
-        """
-        Inputs:
-            density_coarse: (N_rays, N_samples) 粗采样点的密度
-            rays_o: (N_rays, 3) torch tensor    
-            rays_d: (N_rays, 3) torch tensor
-            t_coarse:  (N_rays, N_samples)      粗采样点的深度
-            eps:偏置避免除以0
-
-        returns:
-            t_fine: (N_rays, N_importance) depths along ray 新采样点的深度
-            fine_points: (N_rays, N_importance, 3) sampled 3D points in world coords
-        """
-
-        device = self.device
-        
-        # Step 1:计算归一化权重
-        weights = self.weights_computation(density=density_coarse, t_sample=t_coarse)
-        weights = weights[..., 1:-1]  # 取中间N_samples-1个间隔的权重
-        print(f"weights: {np.array2string(weights[40510,:].cpu().detach().numpy(), precision=5)}")
-        
-        weights = weights + eps  # 防止数值不稳定
-        pdf = weights / torch.sum(weights, -1, keepdim=True)  # [N_rays, N_samples-1]
-        cdf = torch.cumsum(pdf, -1)  # [N_rays, N_samples-1]
-        cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)  # [N_rays, N_samples]
-
-        # Step 2:生成采样点[训练时随机,测试时确定]
-        if self.task == "train":               # 训练模式,随机采样避免过拟合
-            u = torch.rand(list(cdf.shape[:-1]) + [N_importance], device=device)                 # 随机均匀采样
-        else:                                   # 测试模式,确保渲染可重复,减少噪点存在
-            u = torch.linspace(0., 1., steps=N_importance, device=device)  # 线性均匀采样
-            u = u.expand(list(cdf.shape[:-1]) + [N_importance])  # 扩展到与射线数量匹配
-        
-        # Step 3:线性插值找对应cdf采样位置(原方案为获得index后各自在cdf和depth里找左右索引，后发现nerf代码直接构造了左右边界的代码组合更简洁)
-        u = u.contiguous()
-        inds = torch.searchsorted(cdf, u, right=True)                        # 找到u在CDF中的位置
-        print("inds:",inds[40510,:])
-        below = torch.clamp(inds - 1, 0, cdf.shape[-1]-1)                    # 确定左边界
-        above = torch.clamp(inds, 0, cdf.shape[-1]-1)                        # 确定右边界
-        inds_g = torch.stack([below, above], -1)  # [N_rays, N_importance, 2]# 构造采样区间
-
-        # Step 4:计算区间中点，因为区间的权重可以近似看成是区间中点的权重，由此一一对应更加合适
-        bins = 0.5 * (t_coarse[..., 1:] + t_coarse[..., :-1])  # 此时 bins 形状为 (N_rays, N_samples-1)
-
-        # Step 5:从bins中插值出采样点
-        # 统一形状,用于拓展出细采样点的左右边界
-        matched_shape = [inds_g.shape[0], inds_g.shape[1], bins.shape[-1]]      # (N_rays,N_importance,N_samples-1) 
-        
-        # 获取每个采样点对应cdf上下边界
-        cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
-        
-        # 提取每个采样点的深度
-        bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
-        
-        # 计算CDF区间长度,同时避免除以0
-        denom = cdf_g[..., 1] - cdf_g[..., 0]
-        denom = torch.where(denom < eps, torch.ones_like(denom), denom)  # 避免除零
-        
-        # 获取比例，采样点深度
-        t = (u - cdf_g[..., 0]) / denom
-        t_fine = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
-        fine_points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_fine.unsqueeze(2)
-
-        print("t_fine:",t_fine[40510,:])
-        fine_valid_mask = None
-        return fine_points, t_fine, fine_valid_mask
-
     def fine_sample_points(self, density_coarse, rays_o, rays_d, t_coarse, N_importance, N_samples, weights_threshold, eps=1e-5):
         """
         Inputs:
@@ -219,6 +153,17 @@ class Renderer:
 
             both_empty = below_empty & above_empty         # [N_rays, N_importance-2]
             valid_mask = ~both_empty                       # [N_rays, N_importance-2]，确保二维
+
+            # 计算实际有效点数量并打印出来便于对比
+            # （1）统计每个ray（行）中True的数量（沿N_samples维度求和）
+            true_counts_per_ray = valid_mask.sum(dim=1)  # 形状：[N_rays]
+
+            # （2）计算所有ray的True数量的平均值
+            mean_true_count = true_counts_per_ray.float().mean()  # 标量
+
+            # 输出结果
+            print("每个ray中的True数量:", true_counts_per_ray)
+            print("平均每个ray的True数量:", mean_true_count.item())
 
         # Part 3:采样
         # Step 1:计算区间中点
@@ -353,6 +298,7 @@ class Renderer:
             print("Render-importance sampleing fished and fine_net processing")
             
             #细网络分块处理
+            start_time = time.perf_counter()
             outputs = []
             for i in range(0,sampled_points_sorted.shape[0],self.rays_size):
                 outputs_chunk = []
@@ -366,8 +312,16 @@ class Renderer:
                 outputs_chunk = torch.cat(outputs_chunk, dim=1)
                 outputs.append(outputs_chunk)
             outputs = torch.cat(outputs, dim=0)
+
+            # 记录结束时间
+            end_time = time.perf_counter()
+
+            # 计算耗时（秒）
+            elapsed_time = end_time - start_time
             
+            # 打印阶段与耗时结果（保留6位小数，更易读）
             print("Render-fine_net finish processing")
+            print(f"细网络输出过程耗时:{elapsed_time:.6f} 秒")
 
         # Part5:体渲染得到渲染图
         # 从ouputs中获得网络输出的rgb和density

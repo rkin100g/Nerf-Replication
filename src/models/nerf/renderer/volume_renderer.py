@@ -21,7 +21,7 @@ class Renderer:
         self.task = getattr(cfg, "task", "test")
         self.perturb = self.perturb if self.task == "train" else False   # 如果是测试阶段，就不进行随机采样
         self.fast_sampling = getattr(cfg, "fast_sampling", False)
-        self.weights_threshold = getattr(cfg, "weights_threshold", 0.01)
+        self.weights_threshold = getattr(cfg, "weights_threshold", 0.25)
 
 
     def stratified_sample_points_from_rays(self, rays_o, rays_d, N_samples=64, t_n=2.0, t_f=6.0, perturb=True):
@@ -93,9 +93,9 @@ class Renderer:
         # 计算权重
         weights = T * alpha
         
-        return weights
+        return T,weights
 
-    def fine_sample_points(self, density_coarse, rays_o, rays_d, t_coarse, N_importance, N_samples, weights_threshold, eps=1e-5):
+    def fine_sample_points(self, density_coarse, rays_o, rays_d, t_coarse, N_importance, N_samples, weights_threshold, eps=1e-5,ert_threshold=0.45):
         """
         Inputs:
             density_coarse: (N_rays, N_samples) 粗采样点的密度
@@ -110,11 +110,23 @@ class Renderer:
         """
         device = self.device
         valid_mask = None
+        N_rays = rays_o.shape[0]
         
+        # Part 1：判断空射线
+        density_sum = density_coarse.sum(dim=-1)  # (N_rays,)  每条射线的总密度
+        empty_ray_mask = density_sum < 1e-3  # (N_rays,)  True表示空射线
+
+        # 区分物体射线和背景射线
+        density_max = density_coarse.max(dim=-1).values  # (N_rays,)  每条射线的最大密度
+        object_ray_threshold = 0.5
+        object_ray_mask = density_max > object_ray_threshold  # (N_rays,) True=物体射线
+        background_ray_mask = (~object_ray_mask) & (~empty_ray_mask)  # (N_rays,) True=非空背景射线
+
         # Part 1:判断空区间并记录下是否为空区间，判断标准为weights小于一定阈值(如果开启ESS)
         # 计算权重并剔除第一个和最后一个人为补的权重
-        weights = self.weights_computation(density=density_coarse, t_sample=t_coarse)
+        T,weights = self.weights_computation(density=density_coarse, t_sample=t_coarse)
         weights = weights[..., 1:-1]        # (N_rays, N_samples -2)
+        T = T[..., 1:-1]  # 同步剔除首尾，与weights维度一致：(N_rays, N_samples-2)
         
         # 判断是否为空区间并记录
         if self.fast_sampling == True:
@@ -137,7 +149,6 @@ class Renderer:
         # Step 3:线性插值找对应cdf采样位置
         u = u.contiguous()
         inds = torch.searchsorted(cdf, u, right=True)                        
-        print("inds:",inds[40200,:])
 
         below = torch.clamp(inds - 1, 0, N_samples -3)             # weights是N_samples - 2，最大索引为N_samples -3         
         above = torch.clamp(inds, 0, N_samples -3)     
@@ -145,25 +156,93 @@ class Renderer:
 
         # Step 4:筛选空区间得到掩码
         if self.fast_sampling == True :
-            ray_indices = torch.arange(empty_bins.shape[0], device=device).unsqueeze(1).repeat(1, N_importance)
+            # Part 1:掩码构建
+            # (1) ERT 无效掩码
+            ert_mask_base = T < ert_threshold  # [N_rays, N_samples-2]，True表示该点T过低
+            ert_mask_padded = torch.cat([
+                torch.zeros_like(ert_mask_base[:, :1]),  # 首列补False 
+                ert_mask_base
+            ], dim=1)  # [N_rays, N_samples-1]
+            ert_empty_bins = torch.cummax(ert_mask_padded, dim=1)[0][:, 1:]  # [N_rays, N_samples-2] cummax会让后续所有位置保持True
+            
+            row_idx = torch.arange(ert_empty_bins.shape[0], device=device).unsqueeze(1).expand_as(below)  # 从粗区间掩码中，为每个细采样点取对应的ERT标记：(N_rays, N_importance)
+            ert_non_valid = ert_empty_bins[row_idx, below]   # 现在both_empty和ert_mask_for_fine维度一致，可合并
+            ert_valid = ~ert_non_valid  # ERT单独有效：True=有效
 
-            # 使用二维索引直接访问，确保维度匹配
+            # (2) ESS 无效掩码
+            ray_indices = torch.arange(empty_bins.shape[0], device=device).unsqueeze(1).repeat(1, N_importance)
             below_empty = empty_bins[ray_indices, below]  # [N_rays, N_importance-2]
             above_empty = empty_bins[ray_indices, above]  # [N_rays, N_importance-2]
 
-            both_empty = below_empty & above_empty         # [N_rays, N_importance-2]
-            valid_mask = ~both_empty                       # [N_rays, N_importance-2]，确保二维
+            ess_non_valid_object = below_empty & above_empty  # 物体射线的ESS无效掩码
+            # ② 背景射线：宽松判断（below或above空就无效，保证过滤效率）
+            ess_non_valid_background = below_empty | above_empty  # 背景射线的ESS无效掩码
+            # ③ 合并：用object_ray_mask选择对应逻辑（广播到采样点维度）
+            object_mask_expand = object_ray_mask.unsqueeze(1).expand_as(ess_non_valid_object)  # [N_rays, N_importance]
+            ess_non_valid = torch.where(
+                object_mask_expand,  # 条件：是否是物体射线
+                ess_non_valid_object,  # 是：用严格逻辑
+                ess_non_valid_background  # 否：用宽松逻辑
+            )
+            ess_valid = ~ess_non_valid
 
-            # 计算实际有效点数量并打印出来便于对比
-            # （1）统计每个ray（行）中True的数量（沿N_samples维度求和）
-            true_counts_per_ray = valid_mask.sum(dim=1)  # 形状：[N_rays]
+            # (3) 合并掩码
+            non_valid_mask = ess_non_valid | ert_non_valid  # 合并无效掩码
+            valid_mask = ~non_valid_mask 
+            valid_mask[empty_ray_mask] = False              # 空射线全设为False
+        
 
-            # （2）计算所有ray的True数量的平均值
-            mean_true_count = true_counts_per_ray.float().mean()  # 标量
+            # Part 2:数量计算
+            # (1) 基础信息
+            total_points = N_rays * N_importance               # 细采样总点数
+            print("="*49 + " ESS/ERT 过滤效果调试 " + "="*49)
+            print(f"1. 基础信息：")
+            print(f"   - 总射线数量：{N_rays}")
+            print(f"   - 总细采样点数量：{total_points}")
+            print(f"   - ESS 权重阈值：{weights_threshold}, ERT 透射度阈值：{ert_threshold}")
 
-            # 输出结果
-            print("每个ray中的True数量:", true_counts_per_ray)
-            print("平均每个ray的True数量:", mean_true_count.item())
+
+            # (2) 空射线过滤效果
+            empty_ray_count = empty_ray_mask.sum().item()
+            valid_ray_count = N_rays -  empty_ray_count  # 有效射线数
+            empty_only_valid_count = empty_ray_count * N_importance
+            print(f"\n2. 空射线过滤效果：")
+            print(f"   - 空射线数量：{empty_ray_count}(条)")
+            print(f"   - 有效射线数（排除空射线）：{valid_ray_count}（条）")
+            print(f"   - 空射线滤过采样点数量：{empty_only_valid_count}（{empty_only_valid_count/total_points*100:.2f}%）")
+
+            # (3) ESS单独过滤效果
+            ess_only_valid = ess_valid & valid_mask
+            ess_only_valid_count = ess_only_valid.sum().item()
+            ess_reduce_count = total_points - ess_only_valid_count - empty_only_valid_count # ESS单独减少的点数
+            print(f"\n3. ESS 单独效果：")
+            print(f"   - ESS 单独有效点数量：{ess_only_valid_count}")
+            print(f"   - ESS 单独减少点数：{ess_reduce_count}（{ess_reduce_count/total_points*100:.2f}%）")
+            # 额外打印 ESS 权重低于阈值的粗区间占比（判断ESS是否正常工作）
+            ess_coarse_empty_ratio = empty_bins.sum().item() / (empty_bins.shape[0] * empty_bins.shape[1])
+            print(f"   - 粗区间中 ESS 判断为空的比例：{ess_coarse_empty_ratio*100:.2f}%")
+
+            # 3.2 ERT 单独过滤后的有效点：ERT有效 + 有效射线
+            ert_only_valid = ert_valid & valid_mask
+            ert_only_valid_count = ert_only_valid.sum().item()
+            ert_reduce_count = total_points - ert_only_valid_count - empty_only_valid_count # ERT单独减少的点数
+            print(f"\n4. ERT 单独效果：")
+            print(f"   - ERT 单独有效点数量：{ert_only_valid_count}")
+            print(f"   - ERT 单独减少点数：{ert_reduce_count}（{ert_reduce_count/total_points*100:.2f}%）")
+            # 额外打印 ERT 透射度低于阈值的点占比（判断ERT是否正常工作）
+            ert_coarse_low_ratio = ert_mask_base.sum().item() / (ert_mask_base.shape[0] * ert_mask_base.shape[1])
+            print(f"   - 粗区间中 ERT 判断为透射度过低的比例：{ert_coarse_low_ratio*100:.2f}%")
+            print(f"   - 粗采样透射度 T 平均值：{T.mean().item():.6f}（低于 {ert_threshold} 才会过滤）")
+
+            # 3.3 ESS+ERT 共同过滤后的有效点（最终结果）  
+            final_valid_count = valid_mask.sum().item()
+            total_reduce_count = total_points - final_valid_count  # 总共减少的点数
+            common_reduce_count = total_reduce_count - empty_only_valid_count  # 正确公式
+            print(f"\n5. ESS+ERT 共同效果：")
+            print(f"   - 总共减少点数：{total_reduce_count}（{total_reduce_count/total_points*100:.2f}%）")
+            print(f"   - ESS,ERT共同减少点数：{common_reduce_count}（{common_reduce_count/total_points*100:.2f}%）")
+            print("="*118)
+
 
         # Part 3:采样
         # Step 1:计算区间中点
@@ -191,6 +270,7 @@ class Renderer:
         #total_valid = torch.sum(valid_mask).item()  # 转成Python数值，方便打印  
         #print("total points num:",total_valid)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
         return fine_points, t_fine, valid_mask
+
     
     def safe_slice(self, valid_mask, i, j, rays_size, sample_size):
         """
@@ -206,7 +286,7 @@ class Renderer:
             return None
         else:
             return valid_mask[i:i+rays_size,j:j+sample_size]
-    
+
     def render(self, batch):
         """
         This function is responsible for rendering the output of the model, which includes the RGB values and the depth values.
@@ -236,6 +316,7 @@ class Renderer:
         print("Render-coarse_net processing")
         
         # 分块处理
+
         outputs = []
         for i in range(0, coarse_points.shape[0], self.rays_size):
             outputs.append(
@@ -243,6 +324,7 @@ class Renderer:
                                 viewdirs[i:i+self.rays_size],valid_mask=None, model="")
             )
         outputs = torch.cat(outputs, dim=0)
+
 
         print("Render-coarse_net finish processsing")
         
@@ -266,10 +348,6 @@ class Renderer:
             # 合并粗采样点和细采样点
             sampled_points = torch.cat([coarse_points, fine_points],dim=1)
             depth = torch.cat([t_coarse, t_fine], dim=1)
-            
-            # 用完就释放，减少显存占用
-            del coarse_points, fine_points
-            del t_coarse, t_fine
 
             # 排序采样点和深度，便于计算权重
             depth, indices = torch.sort(depth, dim=-1)  # (N_rays, N_samples_total)
@@ -289,16 +367,21 @@ class Renderer:
                 valid_mask_sorted = torch.gather(
                     valid_mask, 1, indices
                 )
+
+                #sampled_points_sorted = fine_points
+                #depth = t_fine
             else:
                 valid_mask_sorted = None
             
             # 用完就释放，减少显存占用
-            del sampled_points, indices
+            del sampled_points, indices,coarse_points, fine_points,t_coarse, t_fine
 
             print("Render-importance sampleing fished and fine_net processing")
             
             #细网络分块处理
+            torch.cuda.synchronize()
             start_time = time.perf_counter()
+
             outputs = []
             for i in range(0,sampled_points_sorted.shape[0],self.rays_size):
                 outputs_chunk = []
@@ -313,10 +396,13 @@ class Renderer:
                 outputs.append(outputs_chunk)
             outputs = torch.cat(outputs, dim=0)
 
+            #outputs = self.net.forward(sampled_points_sorted, viewdirs, valid_mask_sorted, depth, model="fine")
+
             # 记录结束时间
             end_time = time.perf_counter()
 
             # 计算耗时（秒）
+            torch.cuda.synchronize()
             elapsed_time = end_time - start_time
             
             # 打印阶段与耗时结果（保留6位小数，更易读）
@@ -333,7 +419,7 @@ class Renderer:
         density_relu = F.relu(density)
 
         # 计算权重
-        weights = self.weights_computation(density=density_relu, t_sample=depth)   # (N_rays, N_samples)
+        T,weights = self.weights_computation(density=density_relu, t_sample=depth)   # (N_rays, N_samples)
 
         # 求和得到每个像素的rgb与深度值
         rgb_values = torch.sum(weights.unsqueeze(-1) * rgb, dim=1)  # (N_rays, 3)
